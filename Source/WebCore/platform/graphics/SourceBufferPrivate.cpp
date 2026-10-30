@@ -1181,8 +1181,35 @@ bool SourceBufferPrivate::processMediaSample(SourceBufferPrivateClient& client, 
             if (trackBuffer.highestEnqueuedPresentationTime().isValid() && currentTime < trackBuffer.highestEnqueuedPresentationTime() && (!hasAudio() || !m_shouldBypassAudioFlushOnSampleReplacement)) {
                 PlatformTimeRanges possiblyEnqueuedRanges(currentTime, trackBuffer.highestEnqueuedPresentationTime());
                 possiblyEnqueuedRanges.intersectWith(erasedRanges);
-                if (possiblyEnqueuedRanges.length())
+
+                String allTrackBuffersInfo = ""_s;
+                for (auto& pair : m_trackBufferMap) {
+                    const auto& tb = pair.second.get();
+                    const auto& desc = tb.description();
+                    allTrackBuffersInfo = makeString(allTrackBuffersInfo,
+                        " ["_s, (desc ? (desc->isAudio() ? "AUDIO"_s : (desc->isVideo() ? "VIDEO"_s : "OTHER"_s)) : (hasAudio() ? "AUDIO"_s : (hasVideo() ? "VIDEO"_s : "OTHER"_s))),
+                        " TrackBuffer.buffered="_s, tb.buffered().toString(),
+                        " highestEnqueued="_s, tb.highestEnqueuedPresentationTime().isValid() ? String::number(tb.highestEnqueuedPresentationTime().toDouble()) : "invalid"_s,
+                        " decodeQueueSize="_s, String::number(tb.decodeQueue().size()),
+                        " samplesCount="_s, String::number(tb.samples().size()), "]"_s);
+                }
+
+                if (possiblyEnqueuedRanges.length()) {
+                    fprintf(stderr, "[RDKEVD-9097][OVERLAP DETECTED] Coded frame replacement erasedRanges=%s OVERLAPS enqueued range [%.3fs .. %.3fs] (currentTime=%.3fs) | ALL TRACK BUFFERS:%s -> setNeedsReenqueueing(true) / FLUSH TRIGGERED!\n",
+                        erasedRanges.toString().utf8().data(),
+                        currentTime.toDouble(),
+                        trackBuffer.highestEnqueuedPresentationTime().toDouble(),
+                        currentTime.toDouble(),
+                        allTrackBuffersInfo.utf8().data());
                     trackBuffer.setNeedsReenqueueing(true);
+                } else {
+                    fprintf(stderr, "[RDKEVD-9097][APPEND OK] Coded frame replacement erasedRanges=%s is SAFELY OUTSIDE enqueued range [%.3fs .. %.3fs] (currentTime=%.3fs) | ALL TRACK BUFFERS:%s -> NO OVERLAP, NO FLUSH!\n",
+                        erasedRanges.toString().utf8().data(),
+                        currentTime.toDouble(),
+                        trackBuffer.highestEnqueuedPresentationTime().toDouble(),
+                        currentTime.toDouble(),
+                        allTrackBuffersInfo.utf8().data());
+                }
             }
 
             erasedRanges.invert();

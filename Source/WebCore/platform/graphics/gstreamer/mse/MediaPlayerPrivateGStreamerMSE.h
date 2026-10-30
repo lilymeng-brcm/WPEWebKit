@@ -42,6 +42,7 @@ class MediaSourceTrackGStreamer;
 class MediaPlayerPrivateGStreamerMSE : public MediaPlayerPrivateGStreamer {
 
 public:
+    using MediaPlayerPrivateGStreamer::url;
     Ref<MediaPlayerPrivateGStreamerMSE> create(MediaPlayer* player) { return adoptRef(*new MediaPlayerPrivateGStreamerMSE(player)); }
     virtual ~MediaPlayerPrivateGStreamerMSE();
 

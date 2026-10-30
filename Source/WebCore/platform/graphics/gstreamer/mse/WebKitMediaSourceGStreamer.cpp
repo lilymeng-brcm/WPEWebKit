@@ -174,6 +174,7 @@ struct Stream : public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<Stream> {
     GRefPtr<GstPad> const pad;
     Ref<MediaSourceTrackGStreamer> track;
     GRefPtr<GstStream> streamInfo;
+    mutable std::optional<double> maxLeadCap;
 
     struct StreamingMembers {
         StreamingMembers(GRefPtr<GstCaps>&& initialCaps, GstClockTime startTime, double rate)
@@ -472,6 +473,34 @@ static void webKitMediaSrcWaitForPadLinkedOrFlush(GstPad* pad, DataMutexLocker<S
     GST_DEBUG_OBJECT(pad, "Finished waiting for the pad to be linked.");
 }
 
+
+static double maxVideoEnqueuedLeadSeconds(Stream* stream)
+{
+    if (!stream || !stream->source)
+        return 0.0;
+
+    if (stream->maxLeadCap)
+        return *stream->maxLeadCap;
+
+    auto player = webKitMediaSrcPlayer(stream->source);
+    if (!player)
+        return 0.0;
+
+    String urlStr = player->url().string();
+    bool isSpotify = urlStr.contains("spotify.com"_s) || urlStr.contains("scdn.co"_s);
+    if (!isSpotify) {
+        stream->maxLeadCap = 0.0;
+        return 0.0;
+    }
+
+    const char* envCap = getenv("WEBKIT_MSE_SRC_LOOP_LEAD_CAP_SECONDS");
+    double cap = envCap ? atof(envCap) : 0.0;
+    stream->maxLeadCap = cap;
+    fprintf(stderr, "Spotify URL: %s | WEBKIT_MSE_SRC_LOOP_LEAD_CAP_SECONDS: %s | maxLeadCap: %.1fs\n",
+        urlStr.utf8().data(), envCap ? envCap : "(null)", cap);
+    return cap;
+}
+
 // Called with STREAM_LOCK.
 static void webKitMediaSrcLoop(void* userData)
 {
@@ -619,6 +648,41 @@ static void webKitMediaSrcLoop(void* userData)
         streamingMembers.unlockEarly();
 
         ASSERT(GST_BUFFER_PTS_IS_VALID(buffer.get()));
+
+        if (stream->track->type() == TrackPrivateBaseGStreamer::TrackType::Video && GST_BUFFER_PTS_IS_VALID(buffer.get())) {
+            double maxLeadSec = maxVideoEnqueuedLeadSeconds(stream.get());
+            if (maxLeadSec > 0.0) {
+                GstClockTime bufferPts = GST_BUFFER_PTS(buffer.get());
+                int waitRetry = 60;
+                                while (waitRetry > 0) {
+                    {
+                        DataMutexLocker streamingMembersCheck { stream->streamingMembersDataMutex };
+                        if (streamingMembersCheck->isFlushing) {
+                            gst_pad_pause_task(pad);
+                            return;
+                        }
+                    }
+
+                    auto player = webKitMediaSrcPlayer(stream->source);
+                    GstClockTime currentPos = GST_CLOCK_TIME_NONE;
+                    if (player) {
+                        MediaTime curTime = player->currentTime();
+                        currentPos = toGstClockTime(curTime);
+                    }
+
+                    if (GST_CLOCK_TIME_IS_VALID(currentPos) && bufferPts > (GstClockTime)currentPos) {
+                        double leadSec = (double)(bufferPts - currentPos) / 1000000000.0;
+                        if (leadSec > maxLeadSec) {
+                            g_usleep(50000);
+                            waitRetry--;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
         GST_TRACE_OBJECT(pad, "Pushing buffer downstream: %" GST_PTR_FORMAT, buffer.get());
         GstFlowReturn result = gst_pad_push(pad, buffer.leakRef());
         if (result == GST_FLOW_NOT_LINKED && stream->track->type() == TrackPrivateBaseGStreamer::TrackType::Video) {
